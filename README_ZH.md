@@ -130,9 +130,13 @@ Export-Certificate -Cert $cert -FilePath .\OSSShare.cer
 请在带有 Windows SDK 工具链的 Developer PowerShell 中执行：
 
 ```powershell
-makeappx.exe pack /d .\sparse-package /p .\sparse-package\OSSShare.msix /o
-signtool.exe sign /fd SHA256 /f .\OSSShare.pfx /p changeit .\sparse-package\OSSShare.msix
+New-Item -ItemType Directory -Force .\artifacts | Out-Null
+makeappx.exe pack /d .\sparse-package /p .\artifacts\OSSShare.msix /o /nv
+signtool.exe sign /fd SHA256 /f .\OSSShare.pfx /p changeit .\artifacts\OSSShare.msix
+Copy-Item .\artifacts\OSSShare.msix .\sparse-package\OSSShare.msix -Force
 ```
+
+这里必须带上 `/nv`，因为这是一个 sparse package，`oss-share.exe` 和 `oss_share_shell.dll` 会从外部安装目录解析，而不是被直接打进 MSIX 包体。
 
 ### 4. 构建 NSIS 安装器
 

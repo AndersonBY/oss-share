@@ -118,16 +118,29 @@ jobs:
         env:
           WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
         run: |
-          $msixPath = Join-Path $env:GITHUB_WORKSPACE 'sparse-package\OSSShare.msix'
-          if (Test-Path $msixPath) {
-            Remove-Item -LiteralPath $msixPath -Force
+          $packageDir = Join-Path $env:GITHUB_WORKSPACE 'sparse-package'
+          $stagingDir = Join-Path $env:RUNNER_TEMP 'sparse-package-build'
+          $stagedMsixPath = Join-Path $stagingDir 'OSSShare.msix'
+          $finalMsixPath = Join-Path $packageDir 'OSSShare.msix'
+
+          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+
+          if (Test-Path $stagedMsixPath) {
+            Remove-Item -LiteralPath $stagedMsixPath -Force
+          }
+          if (Test-Path $finalMsixPath) {
+            Remove-Item -LiteralPath $finalMsixPath -Force
           }
 
-          & $env:MAKEAPPX pack /d (Join-Path $env:GITHUB_WORKSPACE 'sparse-package') /p $msixPath /o
+          # Sparse packages point to binaries in the external install location, so
+          # semantic manifest validation must be disabled during packing.
+          & $env:MAKEAPPX pack /d $packageDir /p $stagedMsixPath /o /nv
           if ($LASTEXITCODE -ne 0) { throw 'makeappx.exe failed.' }
 
-          & $env:SIGNTOOL sign /fd SHA256 /f $env:SIGNING_PFX /p $env:WINDOWS_CERT_PASSWORD $msixPath
+          & $env:SIGNTOOL sign /fd SHA256 /f $env:SIGNING_PFX /p $env:WINDOWS_CERT_PASSWORD $stagedMsixPath
           if ($LASTEXITCODE -ne 0) { throw 'signtool failed for OSSShare.msix.' }
+
+          Copy-Item -LiteralPath $stagedMsixPath -Destination $finalMsixPath -Force
 
       - name: Build and sign NSIS installer
         env:

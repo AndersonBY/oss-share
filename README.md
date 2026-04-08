@@ -130,9 +130,13 @@ Export-Certificate -Cert $cert -FilePath .\OSSShare.cer
 Run these commands from a Developer PowerShell where `makeappx.exe` and `signtool.exe` are available:
 
 ```powershell
-makeappx.exe pack /d .\sparse-package /p .\sparse-package\OSSShare.msix /o
-signtool.exe sign /fd SHA256 /f .\OSSShare.pfx /p changeit .\sparse-package\OSSShare.msix
+New-Item -ItemType Directory -Force .\artifacts | Out-Null
+makeappx.exe pack /d .\sparse-package /p .\artifacts\OSSShare.msix /o /nv
+signtool.exe sign /fd SHA256 /f .\OSSShare.pfx /p changeit .\artifacts\OSSShare.msix
+Copy-Item .\artifacts\OSSShare.msix .\sparse-package\OSSShare.msix -Force
 ```
+
+`/nv` is required here because this is a sparse package that resolves `oss-share.exe` and `oss_share_shell.dll` from the external install location instead of embedding them into the MSIX itself.
 
 ### 4. Build the NSIS installer
 

@@ -1,0 +1,220 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    env:
+      CI: true
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set up Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install NSIS
+        run: choco install nsis --yes --no-progress
+
+      - name: Locate Windows build tools
+        run: |
+          $kitsRoot = 'C:\Program Files (x86)\Windows Kits\10\bin'
+          $makeAppx = Get-ChildItem "$kitsRoot\*\x64\makeappx.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          $signTool = Get-ChildItem "$kitsRoot\*\x64\signtool.exe" |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+          $makensis = Get-ChildItem 'C:\Program Files (x86)\NSIS\makensis.exe' |
+            Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $makeAppx) { throw 'makeappx.exe was not found on the runner.' }
+          if (-not $signTool) { throw 'signtool.exe was not found on the runner.' }
+          if (-not $makensis) { throw 'makensis.exe was not found after installing NSIS.' }
+
+          "MAKEAPPX=$makeAppx" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SIGNTOOL=$signTool" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "MAKENSIS=$makensis" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Build shell extension
+        run: cargo build --manifest-path .\shell-extension\Cargo.toml --release --locked
+
+      - name: Build desktop app
+        run: cargo build --manifest-path .\src-tauri\Cargo.toml --release --locked
+
+      - name: Restore signing certificate
+        env:
+          WINDOWS_CERT_PFX_BASE64: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERT_PFX_BASE64) { throw 'Missing repository secret WINDOWS_CERT_PFX_BASE64.' }
+          if (-not $env:WINDOWS_CERT_PASSWORD) { throw 'Missing repository secret WINDOWS_CERT_PASSWORD.' }
+
+          $signingDir = Join-Path $env:RUNNER_TEMP 'signing'
+          New-Item -ItemType Directory -Force -Path $signingDir | Out-Null
+
+          $pfxPath = Join-Path $signingDir 'ossshare-signing.pfx'
+          $cerPath = Join-Path $env:GITHUB_WORKSPACE 'OSSShare.cer'
+          $securePassword = ConvertTo-SecureString $env:WINDOWS_CERT_PASSWORD -AsPlainText -Force
+          $pfxBytes = [Convert]::FromBase64String(($env:WINDOWS_CERT_PFX_BASE64 -replace '\s', ''))
+
+          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+          $pfxData = Get-PfxData -FilePath $pfxPath -Password $securePassword
+          Export-Certificate -Cert $pfxData.EndEntityCertificates[0] -FilePath $cerPath | Out-Null
+
+          "SIGNING_PFX=$pfxPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SIGNING_CER=$cerPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Sign native binaries
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $targets = @(
+            (Join-Path $env:GITHUB_WORKSPACE 'src-tauri\target\release\oss-share.exe'),
+            (Join-Path $env:GITHUB_WORKSPACE 'shell-extension\target\release\oss_share_shell.dll')
+          )
+
+          foreach ($target in $targets) {
+            if (-not (Test-Path $target)) { throw "Missing build output: $target" }
+            & $env:SIGNTOOL sign /fd SHA256 /f $env:SIGNING_PFX /p $env:WINDOWS_CERT_PASSWORD $target
+            if ($LASTEXITCODE -ne 0) { throw "signtool failed for $target" }
+          }
+
+      - name: Build and sign sparse package
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $msixPath = Join-Path $env:GITHUB_WORKSPACE 'sparse-package\OSSShare.msix'
+          if (Test-Path $msixPath) {
+            Remove-Item -LiteralPath $msixPath -Force
+          }
+
+          & $env:MAKEAPPX pack /d (Join-Path $env:GITHUB_WORKSPACE 'sparse-package') /p $msixPath /o
+          if ($LASTEXITCODE -ne 0) { throw 'makeappx.exe failed.' }
+
+          & $env:SIGNTOOL sign /fd SHA256 /f $env:SIGNING_PFX /p $env:WINDOWS_CERT_PASSWORD $msixPath
+          if ($LASTEXITCODE -ne 0) { throw 'signtool failed for OSSShare.msix.' }
+
+      - name: Build and sign NSIS installer
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          Push-Location (Join-Path $env:GITHUB_WORKSPACE 'installer\nsis')
+          try {
+            & $env:MAKENSIS .\installer.nsi
+            if ($LASTEXITCODE -ne 0) { throw 'makensis failed.' }
+          } finally {
+            Pop-Location
+          }
+
+          $installerPath = Join-Path $env:GITHUB_WORKSPACE 'installer\nsis\OSSShare-Setup.exe'
+          & $env:SIGNTOOL sign /fd SHA256 /f $env:SIGNING_PFX /p $env:WINDOWS_CERT_PASSWORD $installerPath
+          if ($LASTEXITCODE -ne 0) { throw 'signtool failed for OSSShare-Setup.exe.' }
+
+      - name: Prepare release assets
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $assetDir = Join-Path $env:RUNNER_TEMP 'release-assets'
+          $portableDir = Join-Path $env:RUNNER_TEMP 'portable-win-x64'
+          $msixDir = Join-Path $env:RUNNER_TEMP 'msix-win-x64'
+
+          New-Item -ItemType Directory -Force -Path $assetDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $portableDir | Out-Null
+          New-Item -ItemType Directory -Force -Path $msixDir | Out-Null
+
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'src-tauri\target\release\oss-share.exe') $portableDir
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'shell-extension\target\release\oss_share_shell.dll') $portableDir
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'sparse-package\OSSShare.msix') $msixDir
+          Copy-Item $env:SIGNING_CER $msixDir
+
+          $installerAsset = Join-Path $assetDir "OSSShare-$tag-setup-win-x64.exe"
+          $portableAsset = Join-Path $assetDir "OSSShare-$tag-binaries-win-x64.zip"
+          $msixAsset = Join-Path $assetDir "OSSShare-$tag-msix-win-x64.zip"
+          $checksumsAsset = Join-Path $assetDir 'SHA256SUMS.txt'
+
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'installer\nsis\OSSShare-Setup.exe') $installerAsset
+          if (Test-Path $portableAsset) { Remove-Item -LiteralPath $portableAsset -Force }
+          if (Test-Path $msixAsset) { Remove-Item -LiteralPath $msixAsset -Force }
+
+          Compress-Archive -Path (Join-Path $portableDir '*') -DestinationPath $portableAsset
+          Compress-Archive -Path (Join-Path $msixDir '*') -DestinationPath $msixAsset
+
+          $hashLines = Get-ChildItem $assetDir -File |
+            Sort-Object Name |
+            ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $($_.Name)"
+            }
+
+          Set-Content -LiteralPath $checksumsAsset -Value $hashLines -Encoding ascii
+          "RELEASE_ASSET_DIR=$assetDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $title = "OSS Share $tag"
+          $assets = Get-ChildItem $env:RELEASE_ASSET_DIR -File | Sort-Object Name | ForEach-Object { $_.FullName }
+
+          & gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            & gh release upload $tag @assets --clobber
+            if ($LASTEXITCODE -ne 0) { throw "Failed to upload assets to existing release $tag." }
+            exit 0
+          }
+
+          $createArgs = @('release', 'create', $tag, '--verify-tag', '--generate-notes', '--title', $title)
+          if ($tag -match '-') {
+            $createArgs += '--prerelease'
+          }
+
+          & gh @createArgs
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create release $tag." }
+
+          & gh release upload $tag @assets --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload assets to release $tag." }
+
+      - name: Remove temporary signing material
+        if: always()
+        run: |
+          if ($env:SIGNING_PFX -and (Test-Path $env:SIGNING_PFX)) {
+            Remove-Item -LiteralPath $env:SIGNING_PFX -Force
+          }
+          if ($env:SIGNING_CER -and (Test-Path $env:SIGNING_CER)) {
+            Remove-Item -LiteralPath $env:SIGNING_CER -Force
+          }

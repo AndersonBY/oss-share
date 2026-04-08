@@ -155,6 +155,40 @@ makensis installer\nsis\installer.nsi
 - 这是一个明确的 Windows-only 项目。
 - 如果你修改了包身份或发布者，请同步更新 manifest，并重新生成对应证书。
 
+## GitHub 自动发布
+
+仓库已经包含一个基于 tag 触发的 GitHub Actions 工作流：`.github/workflows/release.yml`。
+
+使用前需要先在仓库 Secrets 中配置：
+
+- `WINDOWS_CERT_PFX_BASE64`：签名 `.pfx` 文件内容的 base64 字符串
+- `WINDOWS_CERT_PASSWORD`：该 `.pfx` 的密码
+
+本地把 `PFX` 转成 base64 的 PowerShell 示例：
+
+```powershell
+[Convert]::ToBase64String(
+  [IO.File]::ReadAllBytes((Resolve-Path .\OSSShare.pfx))
+)
+```
+
+发布方式：
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+这个工作流会自动：
+
+- 构建并签名 `oss-share.exe` 和 `oss_share_shell.dll`
+- 构建并签名 sparse package
+- 构建并签名 NSIS 安装器
+- 为对应 tag 创建或更新 GitHub Release
+- 上传签名后的安装器、补充 zip 包和 `SHA256SUMS.txt`
+
+带有连字符的 tag，例如 `v0.2.0-beta.1`，会自动作为 prerelease 发布。
+
 ## 许可证
 
 MIT，见 [LICENSE](./LICENSE)。

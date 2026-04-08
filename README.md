@@ -155,6 +155,40 @@ The resulting installer is written to `installer\nsis\OSSShare-Setup.exe`.
 - This project is Windows-only by design.
 - If you change the package publisher or app identity, regenerate the certificate and update the sparse package manifest accordingly.
 
+## GitHub Releases
+
+The repository includes a tag-driven GitHub Actions workflow at `.github/workflows/release.yml`.
+
+Before using it, configure these repository secrets:
+
+- `WINDOWS_CERT_PFX_BASE64`: base64-encoded contents of your signing `.pfx`
+- `WINDOWS_CERT_PASSWORD`: password for that `.pfx`
+
+PowerShell example for generating the base64 payload locally:
+
+```powershell
+[Convert]::ToBase64String(
+  [IO.File]::ReadAllBytes((Resolve-Path .\OSSShare.pfx))
+)
+```
+
+Release flow:
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow will:
+
+- build and sign `oss-share.exe` and `oss_share_shell.dll`
+- build and sign the sparse package
+- build and sign the NSIS installer
+- create or update the GitHub Release for the pushed tag
+- upload a signed installer, supplementary zip bundles, and `SHA256SUMS.txt`
+
+Tags containing a hyphen, such as `v0.2.0-beta.1`, are published as prereleases.
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).

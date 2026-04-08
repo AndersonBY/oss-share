@@ -1,0 +1,12 @@
+.superpowers/
+node_modules/
+dist/
+src-tauri/target/
+shell-extension/target/
+.tools/
+
+# Signing and release artifacts
+*.cer
+*.pfx
+installer/nsis/*.exe
+sparse-package/*.msix
